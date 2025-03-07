@@ -7,11 +7,46 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama
 
+# ✅ Paths
 FAISS_INDEX_PATH = "faiss_index.bin"
-TEXT_MAP_PATH = "faiss_text_map.json"  # New file to store text mapping
-PDF_FOLDER = r"E:\Ai Muesuem Guide\Books"  
+TEXT_MAP_PATH = "faiss_text_map.json"
+LOCAL_TEXT_FILE = "historical_data.txt"  # New: Local file for faster response
+PDF_FOLDER = r"E:\Ai Muesuem Guide\Books"
 
-# ✅ Step 1: Load PDFs and Extract Text
+# ✅ Museum & Historical Keywords (Filtering Allowed Questions)
+museum_keywords = [
+    "museum", "monument", "artifact", "historical", "history", "ancient", "heritage", "exhibit",
+    "dynasty", "king", "queen", "ruler", "warrior", "battle", "fort", "palace", "kingdom", "inscription", "scripture",
+    "mauryan", "ashoka", "bindusara", "chandragupta", "gupta", "samudragupta", "vikramaditya",
+    "kushan", "kanishka", "satavahana", "pallava", "chola", "rashtrakuta", "chalukya",
+    "maratha", "shivaji", "sambhaji", "shahu", "peshwa", "bajirao", "balaji vishwanath", "balaji baji rao",
+    "nana saheb", "raghunath rao", "madhav rao", "holkar", "scindia", "bhonsle", "gaikwad",
+    "mughal", "babur", "humayun", "akbar", "jahangir", "shah jahan", "aurangzeb", "bahadur shah",
+    "prithviraj chauhan", "rana pratap", "rana sanga", "man singh", "guru gobind singh", "guru nanak",
+    "ranjit singh", "mysore", "tipu sultan", "hyder ali", "nizam", "qutb shahi", "adil shahi",
+    "battle of panipat", "battle of haldighati", "battle of plassey", "battle of buxar",
+    "hampi", "ellora", "ajanta", "konark", "sanchi", "qutub minar", "taj mahal", "red fort",
+    "charminar", "mysore palace", "amer fort", "gwalior fort", "chittorgarh",
+    "coin", "script", "manuscript", "weapon", "sword", "shield", "armor", "horse", "elephant",
+    "indus valley", "harappa", "mohenjo daro", "ashokan edicts", "sarasvati civilization"
+]
+
+# ✅ Step 1: Load Local Text File
+def check_local_text_file(query):
+    if not os.path.exists(LOCAL_TEXT_FILE):
+        return None  # File doesn't exist yet
+
+    with open(LOCAL_TEXT_FILE, "r", encoding="utf-8") as f:
+        data = f.readlines()
+    
+    # Search for an exact match (or partial match)
+    for line in data:
+        if query.lower() in line.lower():
+            return line.strip()  # Return the found data
+    
+    return None  # No match found in local file
+
+# ✅ Step 2: Load PDFs & Extract Text
 def load_pdfs_from_folder(folder_path=PDF_FOLDER):
     print(f"📖 Loading PDFs from '{folder_path}'...")
     pdf_texts = []
@@ -24,7 +59,7 @@ def load_pdfs_from_folder(folder_path=PDF_FOLDER):
     print(f"✅ Loaded {len(pdf_texts)} PDF documents.")
     return pdf_texts
 
-# ✅ Step 2: Process Text and Store in FAISS
+# ✅ Step 3: Store Embeddings in FAISS
 def store_embeddings():
     pdf_texts = load_pdfs_from_folder()
     if not pdf_texts:
@@ -53,13 +88,14 @@ def store_embeddings():
     faiss.write_index(index, FAISS_INDEX_PATH)
     print(f"✅ {len(chunks)} embeddings stored in FAISS!")
 
-    # **NEW:** Save text chunks mapping
+    # Save text mapping
     text_map = {i: chunk.page_content for i, chunk in enumerate(chunks)}
     with open(TEXT_MAP_PATH, "w", encoding="utf-8") as f:
         json.dump(text_map, f, ensure_ascii=False, indent=4)
     
     print(f"✅ Text mapping saved to '{TEXT_MAP_PATH}'")
 
+# ✅ Step 4: Retrieve Relevant Text from FAISS
 def retrieve_relevant_text(query):
     print("🔍 Retrieving Relevant Context from FAISS...")
 
@@ -98,10 +134,21 @@ def retrieve_relevant_text(query):
 
     print(f"✅ FAISS retrieved match at index {retrieved_idx} with distance {distances[0][0]}")
     
-    return text_map[str(retrieved_idx)]  # ✅ Fixed retrieval issue
-def answer_question(question):
-    relevant_context = retrieve_relevant_text(question)
+    return text_map[str(retrieved_idx)]
 
+# ✅ Step 5: Answer Question with Filters
+def answer_question(question):
+    # **Check Local File First**
+    local_answer = check_local_text_file(question)
+    if local_answer:
+        return local_answer  # Return instantly if found
+
+    # **Check Keywords**
+    if not any(keyword in question.lower() for keyword in museum_keywords):
+        return "❌ Sorry, I specialize in museums and Indian history. I can't answer that."
+
+    # **Retrieve Context from FAISS**
+    relevant_context = retrieve_relevant_text(question)
     if relevant_context is None:
         return "⚠️ No relevant historical data found. Try rephrasing your question."
 
@@ -115,26 +162,20 @@ def answer_question(question):
     Provide a concise and informative answer."""
 
     llm = Ollama(model="mistral")
-    response = llm(prompt)
+    return llm(prompt)
 
-    return response
+# ✅ Step 6: Run the Model
 def main():
     print("📖 Loading PDFs and Storing in FAISS...")
-
     if not os.path.exists(FAISS_INDEX_PATH):
         store_embeddings()
-
-    print("\n💬 Ask me anything about Indian History (type 'exit' to stop):")
 
     while True:
         question = input("\n❓ Question: ")
         if question.lower() == "exit":
             break
-        
-        answer = answer_question(question)
-        print("\n💡 Answer:", answer)
+        print("\n💡 Answer:", answer_question(question))
 
 # Run the system
 if __name__ == "__main__":
     main()
-

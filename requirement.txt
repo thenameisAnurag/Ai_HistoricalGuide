@@ -13,3 +13,5 @@ numpy
 scipy
 tqdm
 pypdf
+chromadb
+
