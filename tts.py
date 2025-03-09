@@ -7,134 +7,126 @@ from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings import HuggingFaceEmbeddings
 from langchain_community.llms import Ollama
 
+# ✅ File Paths
 FAISS_INDEX_PATH = "faiss_index.bin"
-TEXT_MAP_PATH = "faiss_text_map.json"  # New file to store text mapping
-PDF_FOLDER = r"E:\Ai Muesuem Guide\Books"  
+TEXT_MAP_PATH = "faiss_text_map.json"
+PDF_FOLDER = r"E:\Ai Muesuem Guide\Books"
 
-# ✅ Step 1: Load PDFs and Extract Text
-def load_pdfs_from_folder(folder_path=PDF_FOLDER):
-    print(f"📖 Loading PDFs from '{folder_path}'...")
+# ✅ Step 1: Load All PDFs and Extract Text
+def load_pdfs_from_folder():
     pdf_texts = []
-    for file in os.listdir(folder_path):
+    
+    for file in os.listdir(PDF_FOLDER):
         if file.endswith(".pdf"):
-            pdf_path = os.path.join(folder_path, file)
+            pdf_path = os.path.join(PDF_FOLDER, file)
             loader = PyPDFLoader(pdf_path)
             documents = loader.load()
             pdf_texts.extend(documents)
-    print(f"✅ Loaded {len(pdf_texts)} PDF documents.")
+
     return pdf_texts
 
-# ✅ Step 2: Process Text and Store in FAISS
-def store_embeddings():
+# ✅ Step 2: Rebuild FAISS Index (Force Refresh)
+def rebuild_faiss_index():
+    print("🔄 Rebuilding FAISS Index...")
     pdf_texts = load_pdfs_from_folder()
+    
     if not pdf_texts:
-        print("⚠️ No PDFs loaded! Please check the folder path.")
-        return
+        print("⚠️ No PDFs found!")
+        return False
 
-    print("🔠 Splitting Text into Chunks...")
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=512, chunk_overlap=50)
     chunks = text_splitter.split_documents(pdf_texts)
 
     if not chunks:
-        print("⚠️ No valid text chunks found. Ensure PDFs contain readable text.")
-        return
+        print("⚠️ No valid text chunks found.")
+        return False
 
     print(f"✅ Split into {len(chunks)} text chunks.")
 
-    # Initialize Embedding Model
     embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-
-    # Generate embeddings
     embeddings = np.array([embeddings_model.embed_query(chunk.page_content) for chunk in chunks], dtype=np.float32)
 
-    # Save FAISS index
+    # ✅ Create a NEW FAISS index (overwrite old one)
     index = faiss.IndexFlatL2(embeddings.shape[1])
     index.add(embeddings)
     faiss.write_index(index, FAISS_INDEX_PATH)
+
     print(f"✅ {len(chunks)} embeddings stored in FAISS!")
 
-    # **NEW:** Save text chunks mapping
+    # ✅ Overwrite `faiss_text_map.json` with new data
     text_map = {i: chunk.page_content for i, chunk in enumerate(chunks)}
     with open(TEXT_MAP_PATH, "w", encoding="utf-8") as f:
         json.dump(text_map, f, ensure_ascii=False, indent=4)
-    
-    print(f"✅ Text mapping saved to '{TEXT_MAP_PATH}'")
 
+    print(f"✅ FAISS Text Map Updated with {len(text_map)} entries!")
+    return True
+
+# ✅ Step 3: Retrieve Relevant Context from FAISS
 def retrieve_relevant_text(query):
-    print("🔍 Retrieving Relevant Context from FAISS...")
-
     if not os.path.exists(FAISS_INDEX_PATH) or not os.path.exists(TEXT_MAP_PATH):
-        print("⚠️ FAISS index or text mapping not found! Run store_embeddings() first.")
         return None
 
-    # Load FAISS index
     index = faiss.read_index(FAISS_INDEX_PATH)
-
     if index.ntotal == 0:
-        print("⚠️ FAISS index is empty! No embeddings found.")
         return None
 
-    # Load text map
     with open(TEXT_MAP_PATH, "r", encoding="utf-8") as f:
         text_map = json.load(f)
 
-    # Generate query embedding
     embeddings_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
     query_embedding = np.array([embeddings_model.embed_query(query)], dtype=np.float32)
 
-    # Retrieve the closest match
     distances, retrieved_index = index.search(query_embedding, k=1)
 
-    if retrieved_index is None or retrieved_index.shape[1] == 0 or retrieved_index[0][0] == -1:
-        print("⚠️ No relevant match found in FAISS!")
+    if retrieved_index[0][0] == -1 or str(retrieved_index[0][0]) not in text_map:
         return None
 
-    retrieved_idx = retrieved_index[0][0]
+    return text_map[str(retrieved_index[0][0])]
 
-    # ✅ Ensure the retrieved index exists in our text map
-    if str(retrieved_idx) not in text_map:
-        print(f"⚠️ Invalid index {retrieved_idx}. No corresponding text found.")
-        return None
+# ✅ Step 4: Generate Historical Prompt
+def generate_history_prompt(question, relevant_context):
+      return f"""
+    You are a historian specializing in Indian history.
+    - Answer **only** if the topic is historical.
+    - Use **verified sources** (FAISS data or history-related keywords).
+    - If no historical context is found, reject the question.
 
-    print(f"✅ FAISS retrieved match at index {retrieved_idx} with distance {distances[0][0]}")
-    
-    return text_map[str(retrieved_idx)]  # ✅ Fixed retrieval issue
+    **HISTORICAL CONTEXT (if available):**
+    {relevant_context if relevant_context else "⚠️ No direct reference found."}
+
+    **USER QUESTION:**
+    {question}
+
+    **YOUR RESPONSE:**
+    - If relevant history is found, provide an accurate answer.
+    - Otherwise, say: **"❌ This is not my expertise. I only provide historical knowledge."**
+    """
+
+# ✅ Step 5: Answer Question using FAISS, or Reject
 def answer_question(question):
     relevant_context = retrieve_relevant_text(question)
+    if relevant_context:
+        prompt = generate_history_prompt(question, relevant_context)
+        llm = Ollama(model="mistral")
+        return llm(prompt)
 
-    if relevant_context is None:
-        return "⚠️ No relevant historical data found. Try rephrasing your question."
+    return "❌ This is not my expertise."
 
-    prompt = f"""You are a professional museum guide specializing in Indian history. 
-    Use the following historical context to answer the question:
-
-    Context: {relevant_context}
-
-    Question: {question}
-    
-    Provide a concise and informative answer."""
-
-    llm = Ollama(model="mistral")
-    response = llm(prompt)
-
-    return response
+# ✅ Step 6: CLI for Local Testing
 def main():
-    print("📖 Loading PDFs and Storing in FAISS...")
-
-    if not os.path.exists(FAISS_INDEX_PATH):
-        store_embeddings()
+    print("\n📖 AI Museum Guide (Local Mode)")
+    print("🔄 Refreshing FAISS Index...")
+    rebuild_faiss_index()
 
     print("\n💬 Ask me anything about Indian History (type 'exit' to stop):")
-
+    
     while True:
         question = input("\n❓ Question: ")
         if question.lower() == "exit":
             break
-        
+
         answer = answer_question(question)
         print("\n💡 Answer:", answer)
 
-# Run the system
 if __name__ == "__main__":
     main()
-
